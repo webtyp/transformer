@@ -3,6 +3,8 @@ package transformer
 import (
 	"math/rand"
 	"testing"
+
+	"webtyp.com/vector"
 )
 
 // BenchmarkEncode_20x12x384 chains the kernels twelve times at the shape of the
@@ -89,10 +91,7 @@ func BenchmarkEncode_20x12x384(b *testing.B) {
 					qRow := qkv[i*(3*dim)+h*headDim : i*(3*dim)+(h+1)*headDim]
 					for j := 0; j < seqLen; j++ {
 						kRow := qkv[j*(3*dim)+dim+h*headDim : j*(3*dim)+dim+(h+1)*headDim]
-						scores[i*seqLen+j] = 0
-						for kIdx := 0; kIdx < headDim; kIdx++ {
-							scores[i*seqLen+j] += qRow[kIdx] * kRow[kIdx]
-						}
+						scores[i*seqLen+j] = vector.Dot(qRow, kRow)
 					}
 				}
 
