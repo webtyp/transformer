@@ -3,8 +3,9 @@ PLAN: "feat: webtyp/transformer — kernels CPU/WASM y el benchmark de la fase 3
 TAG: v0.1.0
 EXECUTOR: unassigned
 REVIEWER: none
-STATUS: running
+STATUS: review
 SESSION: 18091215561444816771
+PR: https://github.com/webtyp/transformer/pull/1
 ---
 
 > Índice maestro: https://github.com/webtyp/agent/blob/main/docs/MASTER_PLAN.md
