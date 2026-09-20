@@ -3,7 +3,8 @@ PLAN: "feat: webtyp/transformer — etapa 2, el grafo real de granite-embedding-
 TAG: v0.2.0
 EXECUTOR: jules
 REVIEWER: none
-REPO: webtyp/transformer
+STATUS: running
+SESSION: 12940459346182632609
 ---
 
 > This plan is dispatched via the CodeJob workflow. See skill: agents-workflow.
