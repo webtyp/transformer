@@ -3,161 +3,164 @@ PLAN: "feat: webtyp/transformer — etapa 2, el grafo real de granite-embedding-
 TAG: v0.2.0
 EXECUTOR: jules
 REVIEWER: none
-STATUS: running
-SESSION: 16550517909693316073
 ---
 
 > This plan is dispatched via the CodeJob workflow. See skill: agents-workflow.
 > Índice maestro: https://github.com/webtyp/agent/blob/main/docs/MASTER_PLAN.md
->
-> **Etapa 2 de 2.** La etapa 1 (`v0.1.0`, ya mergeada) entregó los kernels numéricos
-> genéricos y un arnés sintético de benchmark. Este plan construye el grafo **real** —
-> específico de la arquitectura de `granite-embedding-97m-multilingual-r2` (`ModernBertModel`),
-> no una forma genérica — y corre inferencia real contra el artifact real que producen
-> [`webtyp/weightsc`](https://github.com/webtyp/weightsc/blob/main/docs/PLAN.md) y
-> [`webtyp/tokenizer`](https://github.com/webtyp/tokenizer/blob/main/docs/PLAN.md).
->
-> **Todos los números de arquitectura de abajo están verificados contra el `config.json` y el
-> header real de `model.safetensors` del modelo** (HuggingFace,
-> `ibm-granite/granite-embedding-97m-multilingual-r2`), no de memoria ni de un paper genérico
-> de ModernBERT. Donde un detalle no está fijado acá (ver "Verificación obligatoria contra la
-> fuente" más abajo), la fuente de verdad es el código real de HuggingFace `transformers`
-> (`modeling_modernbert.py`, versión `4.56.2` — la que exportó este `config.json`), no una
-> suposición.
 >
 > **Nota de idioma:** la prosa va en español; los bloques de código mantienen sus
 > comentarios en inglés.
 
 # Plan — `webtyp/transformer`, etapa 2
 
-## Responsabilidad única
+## Leé esta sección PRIMERO. No escribas una línea de código antes de terminarla.
 
-Ids de tokens y pesos entran; **un vector sale**. Este plan implementa el forward pass real
-de `ModernBertModel` para embeddings — nada de entrenamiento, nada de cabeza de MLM, nada de
-generación.
+Este repo **ya tiene código de la etapa 1, publicado y correcto**. Esta etapa lo **extiende**,
+no lo reemplaza y no lo reescribe. Si en algún momento sentís que "sería más simple empezar de
+nuevo" o "reorganizar todo el paquete", pará: es la señal de que no leíste esta sección con
+cuidado. Dos intentos anteriores de este mismo plan se abortaron por reescribir de más — esta
+sección existe específicamente para que no pase una tercera vez.
 
-## Design gate
+**Archivos que YA EXISTEN en este repo, ahora mismo, en `main`:**
 
-Esta etapa cambia una firma ya publicada (`RoPE`, v0.1.0) y agrega un kernel nuevo — pasa por
-el gate.
+| Archivo | Qué tiene | Qué hacés con él en esta etapa |
+|---|---|---|
+| `kernels.go` | Los 7 kernels de la etapa 1 (lista exacta abajo) | **Editalo una sola vez**, para el cambio de firma de `RoPE` (Stage 1). Nada más ahí cambia. |
+| `kernels_test.go` | Tests de esos 7 kernels | Actualizá las llamadas a `RoPE` a la firma nueva (Stage 1). No toques nada más de este archivo. |
+| `bench_test.go` | `BenchmarkEncode_20x12x384`, el arnés sintético de la etapa 1 | Se reemplaza por un benchmark que llama al `Encode` real (Stage 5). El arnés sintético cumplió su propósito (midió el piso de la fase 3) y ya no hace falta mantenerlo. |
+| `transformer.go` | Un stub vacío del scaffold inicial (`gonew`): `type Transformer struct{}`, `func New() *Transformer` | **Borralo.** No es parte de ningún diseño — es lo que `gonew` deja por defecto en todo repo nuevo. No lo uses como base ni le agregues campos: la API real de esta etapa va en un archivo nuevo, `encode.go` (Stage 2). |
+| `README.md`, `AGENTS.md` | Docs de la etapa 1 | `README.md` se actualiza en Stage 5 con el benchmark nuevo. `AGENTS.md` no cambia. |
 
-**1. Prior art.** `modeling_modernbert.py` de HuggingFace `transformers` (la implementación de
-referencia de este modelo exacto); `llama.cpp`'s `ggml` para el patrón de "grafo compuesto de
-kernels reusables" en C; `onnxruntime`'s graph de operadores. Este plan porta el primero
-literalmente — no reinterpreta la arquitectura, la copia.
+**Los 7 kernels de `kernels.go`, firmas EXACTAS tal como están hoy — no las reimplementes, no
+las "mejores", llamalas tal cual:**
 
-**2. Novice-name test.** `Encode(cfg, weights, tokenEmbeds, seqLen)` — mismo verbo que ya usa
-la etapa 1 en sus comentarios y que usa toda la literatura de embeddings ("encode a sentence").
-`GatedFFN` es el nombre que ya usa la arquitectura (SwiGLU/GeGLU son casos particulares de
-"FFN con compuerta"; acá no hace falta el nombre exacto de la variante, el comportamiento es
-lo que importa).
-
-**3. Complexity ledger.**
+```go
+func MatmulT(dst, a, bT []float32, m, k, n int) error
+func LayerNorm(dst, src, gamma, beta []float32, dim int, eps float32) error
+func RMSNorm(dst, src, gamma []float32, dim int, eps float32) error
+func Softmax(x []float32) error
+func GELU(x []float32) error
+func SiLU(x []float32) error
+func Add(dst, src []float32) error
+func RoPE(q, k []float32, pos, dim, heads int) error  // esta SÍ cambia — es la única. Ver Stage 1.
 ```
-Kernels nuevos                      +1 (GatedFFN — no existía en la etapa 1)
-Firmas que cambian                  1  (RoPE gana un parámetro theta — ver abajo)
-Formas de hacer un forward pass     1  (Encode; nada más lo re-implementa)
-```
 
-**4. Dónde vive.** Mismo repo que la etapa 1 — es su continuación directa, no una capa nueva.
-Sigue sin depender de `weights` ni de `tokenizer` (la regla de la etapa 1 no cambia: recibe
-tensores ya decodificados e ids ya tokenizados, ver "Qué NO entra a este paquete" abajo).
+`MatmulT` ya espera `bT` **transpuesta** (fila = dimensión de salida). Todos los pesos que uses
+en esta etapa vienen ya transpuestos así — no transpongas nada vos, y no le pases una matriz en
+el layout que no sea ese.
 
-**5. Qué borra / qué cambia.** `RoPE(q, k []float32, pos, dim, heads int) error` (v0.1.0) tenía
-`10000.0` fijo adentro — un valor que **ningún candidato real usa** (`granite` usa 150000 y
-160000, ver abajo). Era una firma incompleta descubierta en su primer uso real, no una
-decisión estable — se corrige acá, en el primer PR que la necesita, no se acarrea el defecto
-con un segundo parámetro opcional ni un wrapper. Nueva firma:
+**Dependencias del repo, ya en `go.mod`, no agregues ninguna otra:** `webtyp.com/vector` (usás
+`vector.Dot` indirectamente, a través de `MatmulT` — no lo llames directo) y `webtyp.com/fmt`
+(para errores: `fmt.Err("transformer: mensaje")`, nunca el `errors`/`fmt` de stdlib).
+
+**Esta etapa NO depende de `webtyp/weights` ni de `webtyp/tokenizer`.** Aunque esos dos repos
+existen y tienen sus propios planes en curso, este paquete sigue recibiendo tensores ya
+decodificados en `[]float32` y una secuencia ya tokenizada — nunca un `weights.Artifact` ni
+un `tokenizer.BPE`. Si te encontrás importando cualquiera de los dos, pará: te saliste del
+alcance de este plan.
+
+---
+
+## Etapas, en orden. Hacé cada una completa antes de pasar a la siguiente.
+
+### Stage 1 — Cambiar la firma de `RoPE`, y solo eso, en los archivos existentes
+
+`RoPE` (v0.1.0, en `kernels.go`) tiene `10000.0` fijo adentro de la función — ver el código
+actual. Ningún modelo real de este proyecto usa ese valor (`granite-embedding-97m-multilingual-r2`
+usa 150000 o 160000 según la capa, ver Stage 2). Cambiá la firma a:
 
 ```go
 func RoPE(q, k []float32, pos int, theta float64, dim, heads int) error
 ```
 
-Todo call site de la etapa 1 (`bench_test.go`, tests) se actualiza para pasar `10000.0`
-explícito donde antes era implícito — el comportamiento por defecto no cambia para quien ya
-lo usaba, solo deja de estar escondido.
+Adentro de la función, reemplazá el `10000.0` hardcodeado por el parámetro `theta`. Nada más
+cambia en la lógica de `RoPE`.
 
-## Arquitectura real — verificada, no de memoria
+**Archivos a tocar en este stage, y nada más:**
+- `kernels.go`: la firma y el cuerpo de `RoPE`.
+- `kernels_test.go`: cada test que llama a `RoPE` le pasa `10000.0` explícito donde antes no
+  hacía falta (`TestRoPE_RotationPreservesNorm`, `TestRoPE_PositionZeroIsIdentity`).
+- `bench_test.go`: la llamada a `RoPE` dentro de `BenchmarkEncode_20x12x384` — aunque ese
+  benchmark se reemplaza en Stage 5, tiene que seguir compilando mientras tanto, así que
+  actualizale la llamada acá también (pasale `10000.0`).
+
+**Verificación de este stage:** `go build ./... && go test ./...` pasa, sin tocar ningún otro
+archivo.
+
+### Stage 2 — Arquitectura real de `granite-embedding-97m-multilingual-r2`, verificada
+
+Estos números salen de leer el `config.json` real y el header real de `model.safetensors` del
+modelo (HuggingFace, `ibm-granite/granite-embedding-97m-multilingual-r2`) — no son de un paper
+genérico de ModernBERT ni de memoria:
 
 ```
-model_type: modernbert          hidden_size: 384        num_hidden_layers: 12
-num_attention_heads: 12         intermediate_size: 1536  vocab_size: 180000
-layer_norm_eps: 1e-5            attention_bias: false    mlp_bias: false
-norm_bias: false                global_attn_every_n_layers: 3
-global_rope_theta: 150000.0     local_rope_theta: 160000.0     local_attention: 128
+num_hidden_layers: 12       num_attention_heads: 12      hidden_size: 384
+intermediate_size: 1536     layer_norm_eps: 1e-5          vocab_size: 180000
+attention_bias: false       mlp_bias: false                norm_bias: false
+global_attn_every_n_layers: 3
+global_rope_theta: 150000.0    local_rope_theta: 160000.0    local_attention: 128
 classifier_pooling: "cls"
 ```
 
-`num_attention_heads` es **12**, no 6 — la etapa 1 benchmarkeó con 6 porque el modelo todavía
-no estaba elegido. `head_dim = 384 / 12 = 32`.
+`head_dim = 384 / 12 = 32` (12 cabezales, no 6 — la etapa 1 benchmarkeó con 6 porque el modelo
+todavía no estaba elegido; esta etapa usa el número real).
 
-**Capas globales vs. locales:** cada 3 capas hay una de atención **global** (completa); el
-resto son **locales** (ventana deslizante). Con `global_attn_every_n_layers = 3`, las capas
-0, 3, 6, 9 son globales (verificalo contra `modeling_modernbert.py`: la convención exacta de
-qué índice cuenta como "cada N" — 0-indexed vs 1-indexed — es exactamente el tipo de detalle
-que hay que leer del código real, no adivinar). Las capas globales usan `global_rope_theta`
-(150000); las locales, `local_rope_theta` (160000) con una máscara de ventana de
-`local_attention` (128) tokens.
+**Capas globales vs. locales:** cada 3 capas hay una de atención global (completa); el resto
+son locales (ventana deslizante de 128). Con `global_attn_every_n_layers = 3`, las capas 0, 3,
+6, 9 son globales — **confirmá la convención exacta (0-indexed módulo 3) contra
+`modeling_modernbert.py` de `huggingface/transformers` versión `4.56.2`** (la que exportó este
+`config.json`) antes de escribirlo; no la adivines de esta prosa. Las capas globales usan
+`global_rope_theta` (150000); las locales, `local_rope_theta` (160000) con la ventana de 128.
 
-**Para una consulta del navegador (~20-30 tokens) esto no cambia nada observable:** la
-ventana local (128) es más ancha que la secuencia entera, así que atención local y global dan
-el mismo resultado. Para un documento del backend (hasta 8K tokens) sí importa — implementá la
-ventana correctamente igual, pero no le dediques el mismo esfuerzo de testing que al resto:
-el test de aceptación de este plan usa una secuencia corta (ver Tests).
+**Para una consulta de navegador (~20-30 tokens) esto no cambia nada observable** — la ventana
+local (128) es más ancha que la secuencia entera, así que atención local y global dan el mismo
+resultado. Implementá la ventana correcta igual (para cuando el backend embeba documentos de
+hasta 8K tokens), pero el test de aceptación de este plan usa secuencias cortas — no le
+dediques a esto el mismo esfuerzo de testing que al resto.
 
-**Capa 0 no tiene `attn_norm`.** Verificado en el header real de `model.safetensors`: las
-capas 1-11 tienen `layers.N.attn_norm.weight`, la capa 0 no — usa `Identity` ahí porque
-`embeddings.norm` ya normalizó justo antes. Si tu grafo aplica un norm antes de la atención de
-la capa 0, está mal.
+**La capa 0 no tiene norm antes de la atención.** Usa `Identity` ahí porque `embeddings.norm`
+ya normalizó justo antes. En la `Config`/`Weights` de Stage 3, esto se representa con
+`AttnNormGamma: nil` para la capa 0 — `LayerNorm` de `kernels.go` ya acepta `gamma == nil`
+(mirá su firma arriba), así que no hace falta una rama especial en tu grafo, solo pasar `nil`
+para esa capa.
 
-**El MLP es con compuerta (`GatedFFN`), no MLP simple.** `layers.N.mlp.Wi.weight` tiene shape
-`[3072, 384]` — el doble de `intermediate_size` (1536), porque son **dos proyecciones
-fusionadas en una sola matriz**: una que se activa y otra que actúa de compuerta
-multiplicativa. `hidden_activation: "silu"` en `config.json`. **El orden exacto de qué mitad
-es cuál y en qué orden se multiplican es del código real de `modeling_modernbert.py`
-(`ModernBertMLP.forward`) — leelo, no lo derives de esta prosa.** El punto de verdad final es
-el test de fixture contra la referencia (ver Tests).
+**El MLP es con compuerta, no un MLP simple.** El peso de proyección de subida es una sola
+matriz que fusiona dos proyecciones (activación de entrada + compuerta multiplicativa),
+`hidden_activation: "silu"`. **El orden exacto de qué mitad lleva la activación y en qué orden
+se multiplican sale de leer `ModernBertMLP.forward` en `modeling_modernbert.py` — no lo
+derives de esta prosa, y no lo dejes "a criterio": el fixture de Stage 4 es lo único que
+confirma si lo tenés bien.**
 
-**Pooling: CLS**, no mean-pooling. `classifier_pooling: "cls"` — el vector de salida es el
-hidden state final en la posición 0 (el token `<|startoftext|>` que `webtyp/tokenizer`
-antepone). No promedies sobre toda la secuencia.
+**Pooling: la posición 0 del último hidden state** (`classifier_pooling: "cls"`), no un
+promedio sobre la secuencia. La posición 0 es el token `<|startoftext|>` que
+`webtyp/tokenizer` antepone.
 
-**Sin biases en ningún lado** (`attention_bias`, `mlp_bias`, `norm_bias` todos `false`) — los
-kernels de la etapa 1 ya soportan `gamma`/`beta` opcionales (`nil`) en `LayerNorm`; usalos con
-`beta = nil` en todo este plan.
+**Sin biases en ningún lado** — todo `LayerNorm`/`RMSNorm` de esta etapa se llama con
+`beta = nil`.
 
-## Verificación obligatoria contra la fuente
+### Stage 3 — Archivo nuevo: `encode.go`
 
-No inventes estos tres detalles a partir de esta prosa — leé el código real
-(`huggingface/transformers`, tag/versión `4.56.2`, archivo `modeling_modernbert.py`) antes de
-escribir el grafo:
-
-1. Orden exacto del split de `mlp.Wi` (`input, gate = Wi(x).chunk(2, dim=-1)` — ¿cuál mitad
-   lleva la activación, cuál es la compuerta cruda?).
-2. Convención exacta de qué índice de capa es "global" con `global_attn_every_n_layers = 3`
-   (0-indexed módulo N, o algo distinto).
-3. Ancho exacto de la ventana de atención local (¿128 tokens total, o ±64 a cada lado de la
-   posición actual? ¿Cómo se aplica en los bordes de la secuencia?).
-
-## API
+Un archivo, no varios — si supera 500 líneas, dividilo por dominio y avisá en el PR por qué.
 
 ```go
-// Config is the architecture shape — see "Arquitectura real" above for granite's values.
+package transformer
+
+// Config is the architecture shape. See docs/PLAN.md Stage 2 for granite's real values.
 type Config struct {
-	NumLayers           int
-	Heads               int
-	Dim                 int
-	FFNDim              int     // 1536 — before the ×2 fusion in Wi
-	GlobalEveryNLayers  int
-	LocalWindow         int
-	GlobalRopeTheta     float64
-	LocalRopeTheta      float64
-	Eps                 float32
+	NumLayers          int
+	Heads              int
+	Dim                int
+	FFNDim             int // 1536 — before the ×2 fusion in Wi
+	GlobalEveryNLayers int
+	LocalWindow        int
+	GlobalRopeTheta    float64
+	LocalRopeTheta     float64
+	Eps                float32
 }
 
-// LayerWeights holds one ModernBERT block's tensors, ALREADY DEQUANTIZED to float32 and
-// ALREADY TRANSPOSED for MatmulT (row-major, output-dim-major — same convention the stage 1
-// kernels already use). AttnNormGamma is nil for layer 0 (see "Capa 0" above).
+// LayerWeights holds one block's tensors: already dequantized to float32, already
+// transposed for MatmulT (see "Leé esta sección PRIMERO" above — same row=output-dim
+// convention kernels.go already uses). AttnNormGamma is nil for layer 0 (Stage 2).
 type LayerWeights struct {
 	AttnNormGamma []float32 // [Dim], nil for layer 0
 	WqkvT         []float32 // [3*Dim, Dim]
@@ -168,78 +171,73 @@ type LayerWeights struct {
 }
 
 type Weights struct {
-	EmbedNormGamma []float32 // [Dim]
+	EmbedNormGamma []float32      // [Dim]
 	Layers         []LayerWeights // len == Config.NumLayers
-	FinalNormGamma []float32 // [Dim]
+	FinalNormGamma []float32      // [Dim]
 }
 
+// GatedFFN computes the gated feed-forward block: wiT projects to 2*ffnDim, splits into
+// two halves, applies the activation to one and multiplies elementwise by the other, then
+// woT projects back down. Which half gets the activation: Stage 2's note on the MLP order —
+// verify against modeling_modernbert.py, don't guess. Built on MatmulT and SiLU from
+// kernels.go — do not reimplement either.
+func GatedFFN(dst, src, wiT, woT []float32, seqLen, dim, ffnDim int) error
+
 // Encode runs one forward pass. tokenEmbeds is seqLen*Dim float32 values — the embedding
-// table ROWS FOR THIS SEQUENCE'S TOKENS ONLY, already gathered and dequantized by the
-// caller (see "Qué NO entra a este paquete"). Returns the pooled (CLS) vector, Dim elements long.
-// Does NOT normalize the output — that stays embed's job (unchanged from stage 1).
+// rows FOR THIS SEQUENCE'S TOKENS ONLY, already gathered and dequantized by the caller
+// (webtyp/embed's future adapter — NOT this package; do not add embedding-table gather
+// code here, and do not import webtyp/weights to do it "properly"). Returns the pooled
+// (CLS) vector, Dim elements long. Does NOT L2-normalize — that stays embed's job, same
+// boundary as stage 1.
 func Encode(cfg Config, w Weights, tokenEmbeds []float32, seqLen int) ([]float32, error)
 ```
 
-**`GatedFFN`, el kernel nuevo:**
+Dentro de `Encode`: aplicá `EmbedNormGamma` sobre `tokenEmbeds` (esto es `embeddings.norm`,
+ANTES de la capa 0), después iterá las `NumLayers` capas (cada una: pre-norm de atención si
+`AttnNormGamma != nil` → QKV vía `MatmulT` → `RoPE` con el `theta` que corresponda según si la
+capa es global o local (Stage 2) → atención (global o con ventana local) → proyección de
+salida vía `MatmulT` → residual con `Add` → pre-norm de MLP → `GatedFFN` → residual con `Add`),
+después `FinalNormGamma`, después devolvé la fila 0 del resultado (pooling CLS).
 
-```go
-// GatedFFN computes the gated feed-forward block: Wi projects to 2*ffnDim, splits into
-// two halves, applies the activation to one and multiplies elementwise by the other, then
-// Wo projects back down. See "Verificación obligatoria" #1 for which half gets the
-// activation — get this from modeling_modernbert.py, not from guessing.
-func GatedFFN(dst, src, wiT, woT []float32, seqLen, dim, ffnDim int) error
-```
+### Stage 4 — Fixture de referencia real
 
-Construite sobre `MatmulT` y `SiLU` de la etapa 1 — no reimplementes esas partes.
-
-## Qué NO entra a este paquete
-
-Igual que en la etapa 1: sin `weights`, sin `tokenizer`, sin `syscall/js`. La tabla de
-embeddings completa (180 000 filas) **nunca** se decodifica entera a `float32` — eso costaría
-~276 MB para usar ~20-30 filas por consulta (`MASTER_PLAN.md` D5). Gatherear y dequantizar las
-filas de esta secuencia es responsabilidad del **futuro adaptador `webtyp/embed`**, no de este
-paquete — `Encode` recibe `tokenEmbeds` ya resuelto. No agregues ese código acá aunque
-`embed` todavía no exista: es la responsabilidad de otro repo, y dispatcharlo antes de tiempo
-es trabajo especulativo.
-
-## Tests
-
-**Fixture de referencia real, no inventada.** Igual que `webtyp/tokenizer`: corré el modelo
-real una vez (Python, `sentence-transformers` o `transformers` +
+**No inventes los vectores esperados.** Corré el modelo real una vez (Python, `transformers` +
 `AutoModel.from_pretrained("ibm-granite/granite-embedding-97m-multilingual-r2")`) sobre 2-3
-oraciones cortas fijas, y checkeá el vector de salida (384 floats) como
-`testdata/reference_vectors.json`. Esta es la única forma real de confirmar los tres puntos de
-"Verificación obligatoria" — si los tenés mal, el test lo detecta; si el test pasa y están
-mal, es porque el fixture también está mal, así que generalo con cuidado.
+oraciones cortas fijas, y guardá los vectores de salida (384 floats cada uno) en
+`testdata/reference_vectors.json`, formato `[{"text": "...", "vector": [...]}]`. Esta es la
+única forma real de confirmar que el orden del split de `GatedFFN` y la convención de capas
+globales/locales (Stage 2) están bien — si están mal, este es el test que lo detecta.
+
+### Stage 5 — Tests, en `encode_test.go`
 
 | Test | Verifica |
 |---|---|
-| `TestEncode_MatchesReference` | el vector pooled para cada oración del fixture cae dentro de tolerancia (similitud coseno ≥ 0.99 — hay ruido de cuantización int8 en el camino real, no bit-exacto) del vector real de HuggingFace |
-| `TestGatedFFN_MatchesNaive` | contra una implementación ingenua de dos matmuls + split + activación + multiplicación, 1e-5 relativo |
-| `TestEncode_Layer0SkipsAttnNorm` | pasar `AttnNormGamma: nil` en la capa 0 no pánica y produce el mismo resultado que aplicar directamente sin norm |
-| `TestRoPE_DifferentThetaPerLayerType` | con `theta` distinto, la rotación da resultados distintos para la misma posición (confirma que el parámetro realmente se usa, no quedó hardcodeado en otro lado) |
-| `TestEncode_PoolsPositionZero` | cambiar el hidden state en cualquier posición != 0 no cambia el vector pooled; cambiarlo en la posición 0 sí |
+| `TestEncode_MatchesReference` | por cada entrada de `testdata/reference_vectors.json`, similitud coseno ≥ 0.99 contra el vector real (no bit-exacto — hay ruido de cuantización int8 en el camino real) |
+| `TestGatedFFN_MatchesNaive` | contra una implementación ingenua (dos matmuls + split + activación + multiplicación a mano), 1e-5 relativo |
+| `TestEncode_Layer0SkipsAttnNorm` | `AttnNormGamma: nil` en la capa 0 no pánica |
+| `TestRoPE_DifferentThetaPerLayerType` | dos `theta` distintos dan resultados distintos para la misma posición (confirma que el parámetro se usa de verdad) |
+| `TestEncode_PoolsPositionZero` | cambiar el hidden state en una posición != 0 no cambia el vector pooled; cambiarlo en la posición 0 sí |
 
-## Benchmark real — la comparación que esta tanda de planes existe para producir
+### Stage 6 — Reemplazar el benchmark, y medir en los tres targets
 
-Reemplazá (o agregá junto a) `BenchmarkEncode_20x12x384` de la etapa 1 con un benchmark que
-llame a `Encode` de verdad, con la forma real (12 capas, 12 cabezales, `GatedFFN` real) sobre
-pesos sintéticos del tamaño correcto. Corré los tres targets y registrá los tres números en el
-README, lado a lado — esto es lo que el índice maestro pidió de esta tanda:
+Reemplazá `BenchmarkEncode_20x12x384` en `bench_test.go` por un benchmark que llame a `Encode`
+de verdad (12 capas, 12 cabezales, `GatedFFN` real) sobre pesos sintéticos del tamaño correcto
+— mismo nombre de función está bien, el arnés sintético ya cumplió su propósito.
+
+Corré los tres comandos y registrá los tres números en `README.md`, lado a lado — esto es lo
+que esta etapa existe para producir, no un detalle opcional:
 
 ```bash
-go test -bench=BenchmarkEncode -benchtime=2s .              # nativo
-gotest                                                        # Go stdlib, target js/wasm
-gotest -tinygo                                                 # TinyGo
-tinygo test -target wasm -bench=BenchmarkEncode -benchtime=2s . # el número real, igual que etapa 1
+go test -bench=BenchmarkEncode -benchtime=2s .                   # nativo
+gotest -tinygo                                                    # TinyGo
+tinygo test -target wasm -bench=BenchmarkEncode -benchtime=2s .   # el número real, igual que etapa 1
 ```
 
-Si alguno de los tres falla en compilar o corre pero da un resultado que no tiene sentido
-(por ejemplo, más rápido que el piso derivado), documentalo explícitamente en el README con el
-mensaje de error o el número real — **no lo omitas ni lo redondees**. Es exactamente el dato
-que decide si TinyGo alcanza para este proyecto o si hace falta reconsiderar el toolchain.
+Si alguno falla en compilar o da un número que no tiene sentido (por ejemplo, más rápido que
+el piso derivado en `PENDING_ITEMS.md` P1), documentalo en el README con el mensaje de error o
+el número real tal cual salió — no lo omitas ni lo redondees.
 
-## Checklist de aceptación
+## Checklist de aceptación final
 
 ```bash
 go vet ./...
@@ -251,3 +249,14 @@ grep -rn "syscall/js\|webtyp.com/weights\|webtyp.com/tokenizer" .           # �
 grep -rn "map\[" --include="*.go" . | grep -v _test.go                      # → vacío
 grep -rn '"errors"\|"fmt"' --include="*.go" . | grep -v _test.go            # → vacío
 ```
+
+## Tabla de etapas
+
+| Etapa | Archivos que toca | Archivos que crea |
+|---|---|---|
+| 1 | `kernels.go`, `kernels_test.go`, `bench_test.go` | — |
+| 2 | (solo lectura — arquitectura, no código) | — |
+| 3 | — (borra `transformer.go`) | `encode.go` |
+| 4 | — | `testdata/reference_vectors.json` |
+| 5 | — | `encode_test.go` |
+| 6 | `bench_test.go`, `README.md` | — |
