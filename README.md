@@ -3,11 +3,13 @@
 
 Grafo del encoder transformer y kernels CPU/WASM: ids de tokens entran, un vector sale.
 
-Implementa el forward pass real de `ibm-granite/granite-embedding-97m-multilingual-r2`
-(ModernBERT: 12 capas, 384 dims, 12 cabezales, FFN con compuerta SiLU, RoPE NeoX con
-theta 150000/160000 según capa global/local, pooling CLS en la posición 0).
-Ver [`docs/LAST_PLAN_EXECUTED.md`](docs/LAST_PLAN_EXECUTED.md) (etapa 2) para la arquitectura
-verificada contra `modeling_modernbert.py` de `transformers` 4.56.2.
+Implementa el forward pass real de `ModernBertModel` con `Config` ajustable por modelo —
+mismo grafo, mismos kernels, dos modelos verificados: `ibm-granite/granite-embedding-97m-multilingual-r2`
+(12 capas, 384 dims, 12 cabezales, FFN 1536, pooling CLS) y `hotchpotch/bekko-embedding-v1-a8m`
+(4 capas, 384 dims, 6 cabezales, FFN 1152, pooling **mean**, `Config.Pooling: PoolingMean`).
+Ambos con RoPE NeoX, theta 160000 (a8m) o 150000/160000 según capa global/local (granite).
+Ver [`docs/LAST_PLAN_EXECUTED.md`](docs/LAST_PLAN_EXECUTED.md) (etapa 3, bekko) para los
+valores reales de a8m verificados contra su `config.json` y el header de `model.safetensors`.
 
 ## Desvío documentado respecto al plan
 

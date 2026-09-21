@@ -6,17 +6,31 @@ import (
 	"webtyp.com/fmt"
 )
 
-// Config is the architecture shape. See docs/PLAN.md Stage 2 for granite's real values.
+// Pooling selects how Encode reduces the sequence to a single vector.
+type Pooling int
+
+const (
+	// PoolingCLS takes position 0 (granite-embedding-97m-multilingual-r2). Zero value,
+	// so existing Config literals that predate this field keep their old behavior.
+	PoolingCLS Pooling = iota
+	// PoolingMean averages every position (bekko-embedding-v1-a8m/a25m).
+	PoolingMean
+)
+
+// Config is the architecture shape. See docs/LAST_PLAN_EXECUTED.md for granite's real
+// values, and the a8m/a25m values verified against bekko-embedding-v1-a8m's real
+// config.json + model.safetensors header.
 type Config struct {
 	NumLayers          int
 	Heads              int
 	Dim                int
-	FFNDim             int // 1536 — before the ×2 fusion in Wi
+	FFNDim             int // 1536 (granite) / 1152 (bekko a8m/a25m) — before the ×2 fusion in Wi
 	GlobalEveryNLayers int
 	LocalWindow        int
 	GlobalRopeTheta    float64
 	LocalRopeTheta     float64
 	Eps                float32
+	Pooling            Pooling
 }
 
 // LayerWeights holds one block's tensors: already dequantized to float32, already
@@ -89,8 +103,8 @@ func isGlobalLayer(li, globalEvery int) bool {
 // rows FOR THIS SEQUENCE'S TOKENS ONLY, already gathered and dequantized by the caller
 // (webtyp/embed's future adapter — NOT this package; do not add embedding-table gather
 // code here, and do not import webtyp/weights to do it "properly"). Returns the pooled
-// (CLS) vector, Dim elements long. Does NOT L2-normalize — that stays embed's job, same
-// boundary as stage 1.
+// vector, Dim elements long, per cfg.Pooling (CLS or mean). Does NOT L2-normalize — that
+// stays embed's job, same boundary as stage 1.
 func Encode(cfg Config, w Weights, tokenEmbeds []float32, seqLen int) ([]float32, error) {
 	if cfg.NumLayers <= 0 || cfg.Heads <= 0 || cfg.Dim <= 0 || cfg.FFNDim <= 0 {
 		return nil, fmt.Err("transformer: invalid config for encode")
@@ -238,6 +252,19 @@ func Encode(cfg Config, w Weights, tokenEmbeds []float32, seqLen int) ([]float32
 	}
 
 	pooled := make([]float32, dim)
-	copy(pooled, h[:dim])
+	if cfg.Pooling == PoolingMean {
+		for i := 0; i < seqLen; i++ {
+			row := h[i*dim : (i+1)*dim]
+			for d := 0; d < dim; d++ {
+				pooled[d] += row[d]
+			}
+		}
+		invN := 1.0 / float32(seqLen)
+		for d := 0; d < dim; d++ {
+			pooled[d] *= invN
+		}
+	} else {
+		copy(pooled, h[:dim])
+	}
 	return pooled, nil
 }

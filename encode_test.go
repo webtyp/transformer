@@ -40,6 +40,21 @@ func graniteConfig() Config {
 	}
 }
 
+func bekkoA8mConfig() Config {
+	return Config{
+		NumLayers:          4,
+		Heads:              6,
+		Dim:                384,
+		FFNDim:             1152,
+		GlobalEveryNLayers: 3,
+		LocalWindow:        128,
+		GlobalRopeTheta:    160000.0,
+		LocalRopeTheta:     160000.0,
+		Eps:                1e-5,
+		Pooling:            PoolingMean,
+	}
+}
+
 func synthWeights(rnd *rand.Rand, cfg Config) Weights {
 	news := func(n int) []float32 {
 		b := make([]float32, n)
@@ -433,5 +448,62 @@ func TestEncode_PoolsPositionZero(t *testing.T) {
 	}
 	if mx == 0 {
 		t.Fatalf("disturbing position 0 left pooled vector unchanged")
+	}
+}
+
+func TestEncode_MeanPooling_SingleTokenMatchesCLS(t *testing.T) {
+	cfg := bekkoA8mConfig()
+	rnd := rand.New(rand.NewSource(7))
+	w := synthWeights(rnd, cfg)
+	embeds := make([]float32, cfg.Dim)
+	for i := range embeds {
+		embeds[i] = float32(rnd.NormFloat64() * 0.1)
+	}
+	mean, err := Encode(cfg, w, embeds, 1)
+	if err != nil {
+		t.Fatalf("Encode (mean): %v", err)
+	}
+	clsCfg := cfg
+	clsCfg.Pooling = PoolingCLS
+	cls, err := Encode(clsCfg, w, embeds, 1)
+	if err != nil {
+		t.Fatalf("Encode (cls): %v", err)
+	}
+	for i := range mean {
+		if math.Abs(float64(mean[i]-cls[i])) > 1e-6 {
+			t.Fatalf("mean != cls at seqLen=1, index %d: %v vs %v", i, mean[i], cls[i])
+		}
+	}
+}
+
+func TestEncode_MeanPooling_DiffersFromCLS(t *testing.T) {
+	cfg := bekkoA8mConfig()
+	cfg.NumLayers = 1 // pooling behavior doesn't depend on depth; keep the test cheap
+	rnd := rand.New(rand.NewSource(9))
+	w := synthWeights(rnd, cfg)
+	const seqLen = 5
+	embeds := make([]float32, seqLen*cfg.Dim)
+	for i := range embeds {
+		embeds[i] = float32(rnd.NormFloat64() * 0.1)
+	}
+	got, err := Encode(cfg, w, embeds, seqLen)
+	if err != nil {
+		t.Fatalf("Encode (mean): %v", err)
+	}
+	clsCfg := cfg
+	clsCfg.Pooling = PoolingCLS
+	cls, err := Encode(clsCfg, w, embeds, seqLen)
+	if err != nil {
+		t.Fatalf("Encode (cls): %v", err)
+	}
+	same := true
+	for i := range got {
+		if math.Abs(float64(got[i]-cls[i])) > 1e-6 {
+			same = false
+			break
+		}
+	}
+	if same {
+		t.Fatal("PoolingMean produced the same vector as PoolingCLS for seqLen=5 — pooling switch not wired")
 	}
 }
