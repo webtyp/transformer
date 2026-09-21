@@ -257,7 +257,7 @@ func TestRoPE_RotationPreservesNorm(t *testing.T) {
 	qNormBefore := vector.Norm(q)
 	kNormBefore := vector.Norm(k)
 
-	err := RoPE(q, k, 5, dim, heads)
+	err := RoPE(q, k, 5, 10000.0, dim, heads)
 	if err != nil {
 		t.Fatalf("RoPE returned error: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestRoPE_PositionZeroIsIdentity(t *testing.T) {
 		qOrig[i] = q[i]
 	}
 
-	err := RoPE(q, nil, 0, dim, heads)
+	err := RoPE(q, nil, 0, 10000.0, dim, heads)
 	if err != nil {
 		t.Fatalf("RoPE returned error: %v", err)
 	}

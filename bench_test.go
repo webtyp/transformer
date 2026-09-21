@@ -3,140 +3,74 @@ package transformer
 import (
 	"math/rand"
 	"testing"
-
-	"webtyp.com/vector"
 )
 
-// BenchmarkEncode_20x12x384 chains the kernels twelve times at the shape of the
-// leading candidate — 20 tokens, 384 dims, 6 heads, FFN 1536 — over random weights.
-//
-// This is a COST MODEL, not an encoder. It makes no correctness claim: the order is
-// the generic one (QKV projection, attention, softmax, output projection, FFN,
-// activation, two norms, two residuals), not any specific model's. Getting RoPE
-// placement, masking or GeGLU-vs-SiLU exactly right belongs to stage 2 and does not
-// change the FLOP count this measures.
+// benchSink keeps the benchmark honest: Encode's result is folded here so the
+// compiler cannot eliminate the forward pass as dead work.
+var benchSink float32
+
+// BenchmarkEncode_20x12x384 runs the real Encode forward pass at granite's shape —
+// 20 tokens, 12 layers, 384 dims, 12 heads, FFN 1536 with the gated SiLU block —
+// over fixed synthetic weights. This replaces the stage-1 synthetic harness, whose
+// cost-model purpose (measuring the stage-3 floor) is fulfilled.
 func BenchmarkEncode_20x12x384(b *testing.B) {
 	const (
-		numLayers = 12
-		seqLen    = 20
-		dim       = 384
-		heads     = 6
-		headDim   = dim / heads // 64
-		ffnDim    = 1536
+		seqLen = 20
+		dim    = 384
 	)
 
+	cfg := Config{
+		NumLayers:          12,
+		Heads:              12,
+		Dim:                dim,
+		FFNDim:             1536,
+		GlobalEveryNLayers: 3,
+		LocalWindow:        128,
+		GlobalRopeTheta:    150000.0,
+		LocalRopeTheta:     160000.0,
+		Eps:                1e-5,
+	}
+
 	rnd := rand.New(rand.NewSource(42))
-	fillRand := func(buf []float32) {
+	news := func(n int) []float32 {
+		buf := make([]float32, n)
 		for i := range buf {
 			buf[i] = float32(rnd.NormFloat64() * 0.1)
 		}
+		return buf
+	}
+	ones := func(n int) []float32 {
+		buf := make([]float32, n)
+		for i := range buf {
+			buf[i] = 1.0
+		}
+		return buf
 	}
 
-	x := make([]float32, seqLen*dim)
-	fillRand(x)
-
-	// Pre-allocate weight matrices
-	wQKV_T := make([]float32, 3*dim*dim)
-	fillRand(wQKV_T)
-
-	wO_T := make([]float32, dim*dim)
-	fillRand(wO_T)
-
-	wUp_T := make([]float32, ffnDim*dim)
-	fillRand(wUp_T)
-
-	wDown_T := make([]float32, dim*ffnDim)
-	fillRand(wDown_T)
-
-	gamma := make([]float32, dim)
-	beta := make([]float32, dim)
-	for i := 0; i < dim; i++ {
-		gamma[i] = 1.0
-		beta[i] = 0.0
+	w := Weights{EmbedNormGamma: ones(dim), FinalNormGamma: ones(dim)}
+	for li := 0; li < cfg.NumLayers; li++ {
+		lw := LayerWeights{
+			WqkvT:        news(3 * dim * dim),
+			WoT:          news(dim * dim),
+			MlpNormGamma: ones(dim),
+			WiT:          news(2 * cfg.FFNDim * dim),
+			MlpWoT:       news(dim * cfg.FFNDim),
+		}
+		if li > 0 {
+			lw.AttnNormGamma = ones(dim)
+		}
+		w.Layers = append(w.Layers, lw)
 	}
-
-	// Pre-allocate intermediate operational buffers
-	xNorm1 := make([]float32, seqLen*dim)
-	xNorm2 := make([]float32, seqLen*dim)
-	qkv := make([]float32, seqLen*3*dim)
-	attnConcat := make([]float32, seqLen*dim)
-	attnOut := make([]float32, seqLen*dim)
-	scores := make([]float32, seqLen*seqLen)
-	vHeadT := make([]float32, headDim*seqLen)
-	headCtx := make([]float32, seqLen*headDim)
-	ffnHidden := make([]float32, seqLen*ffnDim)
-	ffnOut := make([]float32, seqLen*dim)
+	embeds := news(seqLen * dim)
 
 	b.ResetTimer()
-
 	for n := 0; n < b.N; n++ {
-		for layer := 0; layer < numLayers; layer++ {
-			// 1. LayerNorm 1
-			_ = LayerNorm(xNorm1, x, gamma, beta, dim, 1e-5)
-
-			// 2. QKV Projection: [20, 384] x [1152, 384]^T -> [20, 1152]
-			_ = MatmulT(qkv, xNorm1, wQKV_T, seqLen, dim, 3*dim)
-
-			// 3. RoPE on Q and K for each token position
-			for pos := 0; pos < seqLen; pos++ {
-				qPos := qkv[pos*(3*dim) : pos*(3*dim)+dim]
-				kPos := qkv[pos*(3*dim)+dim : pos*(3*dim)+2*dim]
-				_ = RoPE(qPos, kPos, pos, dim, heads)
-			}
-
-			// 4. Multi-head Attention
-			for h := 0; h < heads; h++ {
-				// Compute Attention Scores: Q_h [20, 64] x K_h^T [20, 64]^T -> Scores [20, 20]
-				for i := 0; i < seqLen; i++ {
-					qRow := qkv[i*(3*dim)+h*headDim : i*(3*dim)+(h+1)*headDim]
-					for j := 0; j < seqLen; j++ {
-						kRow := qkv[j*(3*dim)+dim+h*headDim : j*(3*dim)+dim+(h+1)*headDim]
-						scores[i*seqLen+j] = vector.Dot(qRow, kRow)
-					}
-				}
-
-				// Softmax per row
-				for i := 0; i < seqLen; i++ {
-					_ = Softmax(scores[i*seqLen : (i+1)*seqLen])
-				}
-
-				// Prepare transposed V_h [64, 20]
-				for j := 0; j < seqLen; j++ {
-					vRow := qkv[j*(3*dim)+2*dim+h*headDim : j*(3*dim)+2*dim+(h+1)*headDim]
-					for kIdx := 0; kIdx < headDim; kIdx++ {
-						vHeadT[kIdx*seqLen+j] = vRow[kIdx]
-					}
-				}
-
-				// Context = Scores [20, 20] x V_h^T [64, 20]^T -> [20, 64]
-				_ = MatmulT(headCtx, scores, vHeadT, seqLen, seqLen, headDim)
-
-				// Copy headCtx into attnConcat [20, 384]
-				for i := 0; i < seqLen; i++ {
-					copy(attnConcat[i*dim+h*headDim:i*dim+(h+1)*headDim], headCtx[i*headDim:(i+1)*headDim])
-				}
-			}
-
-			// 5. Output Projection: [20, 384] x [384, 384]^T -> [20, 384]
-			_ = MatmulT(attnOut, attnConcat, wO_T, seqLen, dim, dim)
-
-			// 6. Residual Add 1
-			_ = Add(x, attnOut)
-
-			// 7. LayerNorm 2
-			_ = LayerNorm(xNorm2, x, gamma, beta, dim, 1e-5)
-
-			// 8. FFN Up: [20, 384] x [1536, 384]^T -> [20, 1536]
-			_ = MatmulT(ffnHidden, xNorm2, wUp_T, seqLen, dim, ffnDim)
-
-			// GELU Activation
-			_ = GELU(ffnHidden)
-
-			// FFN Down: [20, 1536] x [384, 1536]^T -> [20, 384]
-			_ = MatmulT(ffnOut, ffnHidden, wDown_T, seqLen, ffnDim, dim)
-
-			// 9. Residual Add 2
-			_ = Add(x, ffnOut)
+		got, err := Encode(cfg, w, embeds, seqLen)
+		if err != nil {
+			b.Fatalf("Encode: %v", err)
+		}
+		for _, v := range got {
+			benchSink += v
 		}
 	}
 }

@@ -177,7 +177,10 @@ func Add(dst, src []float32) error {
 }
 
 // RoPE applies Rotary Position Embedding in-place to q and k for position `pos`.
-func RoPE(q, k []float32, pos, dim, heads int) error {
+// theta is the rotary base frequency (granite uses 150000/160000 per layer type).
+// Rotation is GPT-NeoX style (first/second half), matching rotate_half in
+// modeling_modernbert.py — not interleaved pairs.
+func RoPE(q, k []float32, pos int, theta float64, dim, heads int) error {
 	if dim <= 0 || heads <= 0 || dim%heads != 0 {
 		return fmt.Err("transformer: invalid dimensions for rope")
 	}
@@ -199,16 +202,17 @@ func RoPE(q, k []float32, pos, dim, heads int) error {
 	rotate := func(v []float32) {
 		for h := 0; h < heads; h++ {
 			head := v[h*headDim : (h+1)*headDim]
-			for i := 0; i < headDim/2; i++ {
-				freq := 1.0 / math.Pow(10000.0, float64(2*i)/float64(headDim))
+			half := headDim / 2
+			for i := 0; i < half; i++ {
+				freq := 1.0 / math.Pow(theta, float64(2*i)/float64(headDim))
 				angle := float64(pos) * freq
 				cosA := float32(math.Cos(angle))
 				sinA := float32(math.Sin(angle))
 
-				x0 := head[2*i]
-				x1 := head[2*i+1]
-				head[2*i] = x0*cosA - x1*sinA
-				head[2*i+1] = x0*sinA + x1*cosA
+				x0 := head[i]
+				x1 := head[i+half]
+				head[i] = x0*cosA - x1*sinA
+				head[i+half] = x0*sinA + x1*cosA
 			}
 		}
 	}
