@@ -6,8 +6,8 @@ Grafo del encoder transformer y kernels CPU/WASM: ids de tokens entran, un vecto
 Implementa el forward pass real de `ibm-granite/granite-embedding-97m-multilingual-r2`
 (ModernBERT: 12 capas, 384 dims, 12 cabezales, FFN con compuerta SiLU, RoPE NeoX con
 theta 150000/160000 según capa global/local, pooling CLS en la posición 0).
-Ver `docs/PLAN.md` (etapa 2) para la arquitectura verificada contra
-`modeling_modernbert.py` de `transformers` 4.56.2.
+Ver [`docs/LAST_PLAN_EXECUTED.md`](docs/LAST_PLAN_EXECUTED.md) (etapa 2) para la arquitectura
+verificada contra `modeling_modernbert.py` de `transformers` 4.56.2.
 
 ## Desvío documentado respecto al plan
 

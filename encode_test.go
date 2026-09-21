@@ -284,7 +284,9 @@ func TestGatedFFN_MatchesNaive(t *testing.T) {
 	}
 	src, wiT, woT := news(seqLen*dim), news(2*ffn*dim), news(dim*ffn)
 	dst := make([]float32, seqLen*dim)
-	if err := GatedFFN(dst, src, wiT, woT, seqLen, dim, ffn); err != nil {
+	hidden32 := make([]float32, seqLen*2*ffn)
+	gated32 := make([]float32, seqLen*ffn)
+	if err := GatedFFN(dst, src, wiT, woT, hidden32, gated32, seqLen, dim, ffn); err != nil {
 		t.Fatalf("GatedFFN: %v", err)
 	}
 	for s := 0; s < seqLen; s++ {

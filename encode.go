@@ -42,7 +42,9 @@ type Weights struct {
 // two halves, applies the activation to the FIRST half and multiplies elementwise by the
 // second half (matching ModernBertMLP.forward: input, gate = Wi(x).chunk(2); Wo(act(input)*gate)),
 // then woT projects back down. Built on MatmulT and SiLU from kernels.go.
-func GatedFFN(dst, src, wiT, woT []float32, seqLen, dim, ffnDim int) error {
+// hidden and gated are caller-owned scratch buffers (seqLen*2*ffnDim and seqLen*ffnDim
+// respectively) — GatedFFN allocates nothing, matching every other kernel in this file.
+func GatedFFN(dst, src, wiT, woT, hidden, gated []float32, seqLen, dim, ffnDim int) error {
 	if seqLen <= 0 || dim <= 0 || ffnDim <= 0 {
 		return fmt.Err("transformer: invalid dimensions for gatedffn")
 	}
@@ -52,13 +54,14 @@ func GatedFFN(dst, src, wiT, woT []float32, seqLen, dim, ffnDim int) error {
 	if len(wiT) < 2*ffnDim*dim || len(woT) < dim*ffnDim {
 		return fmt.Err("transformer: weight buffer too short for gatedffn")
 	}
+	if len(hidden) < seqLen*2*ffnDim || len(gated) < seqLen*ffnDim {
+		return fmt.Err("transformer: scratch buffer too short for gatedffn")
+	}
 
-	hidden := make([]float32, seqLen*2*ffnDim)
 	if err := MatmulT(hidden, src, wiT, seqLen, dim, 2*ffnDim); err != nil {
 		return err
 	}
 
-	gated := make([]float32, seqLen*ffnDim)
 	for s := 0; s < seqLen; s++ {
 		row := hidden[s*2*ffnDim : (s+1)*2*ffnDim]
 		first := row[:ffnDim]
@@ -148,6 +151,8 @@ func Encode(cfg Config, w Weights, tokenEmbeds []float32, seqLen int) ([]float32
 	attnOut := make([]float32, seqLen*dim)
 	mlpIn := make([]float32, seqLen*dim)
 	mlpOut := make([]float32, seqLen*dim)
+	ffnHidden := make([]float32, seqLen*2*ffnDim)
+	ffnGated := make([]float32, seqLen*ffnDim)
 
 	scale := float32(1.0 / math.Sqrt(float64(headDim)))
 	halfWindow := cfg.LocalWindow / 2
@@ -220,7 +225,7 @@ func Encode(cfg Config, w Weights, tokenEmbeds []float32, seqLen int) ([]float32
 		if err := LayerNorm(mlpIn, h, lw.MlpNormGamma, nil, dim, cfg.Eps); err != nil {
 			return nil, err
 		}
-		if err := GatedFFN(mlpOut, mlpIn, lw.WiT, lw.MlpWoT, seqLen, dim, ffnDim); err != nil {
+		if err := GatedFFN(mlpOut, mlpIn, lw.WiT, lw.MlpWoT, ffnHidden, ffnGated, seqLen, dim, ffnDim); err != nil {
 			return nil, err
 		}
 		if err := Add(h, mlpOut); err != nil {
