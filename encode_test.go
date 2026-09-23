@@ -301,7 +301,7 @@ func TestGatedFFN_MatchesNaive(t *testing.T) {
 	dst := make([]float32, seqLen*dim)
 	hidden32 := make([]float32, seqLen*2*ffn)
 	gated32 := make([]float32, seqLen*ffn)
-	if err := GatedFFN(dst, src, wiT, woT, hidden32, gated32, seqLen, dim, ffn); err != nil {
+	if err := GatedFFN(dst, src, wiT, woT, hidden32, gated32, seqLen, dim, ffn, ActivationSiLU); err != nil {
 		t.Fatalf("GatedFFN: %v", err)
 	}
 	for s := 0; s < seqLen; s++ {
@@ -329,6 +329,49 @@ func TestGatedFFN_MatchesNaive(t *testing.T) {
 				t.Fatalf("dst[%d] diff %v over tol %v", s*dim+i, diff, tol)
 			}
 		}
+	}
+}
+
+// TestGatedFFN_ActivationSelectsRealFunction catches exactly the bug found comparing
+// StaticEmbedder against bekko-embedding-v1-a8m's real output (cosine ~0.91 instead of
+// ~1.0): GatedFFN used to hardcode SiLU regardless of Config.Activation, silently wrong for
+// any model whose real hidden_activation is gelu (bekko-embedding-v1-a8m's config.json says
+// exactly that). ActivationSiLU and ActivationGELU must produce DIFFERENT output for the
+// same input — if they don't, act is being ignored again.
+func TestGatedFFN_ActivationSelectsRealFunction(t *testing.T) {
+	const seqLen, dim, ffn = 2, 16, 32
+	rnd := rand.New(rand.NewSource(13))
+	news := func(n int) []float32 {
+		b := make([]float32, n)
+		for i := range b {
+			b[i] = float32(rnd.NormFloat64() * 0.3)
+		}
+		return b
+	}
+	src, wiT, woT := news(seqLen*dim), news(2*ffn*dim), news(dim*ffn)
+
+	run := func(act Activation) []float32 {
+		dst := make([]float32, seqLen*dim)
+		hidden := make([]float32, seqLen*2*ffn)
+		gated := make([]float32, seqLen*ffn)
+		if err := GatedFFN(dst, src, wiT, woT, hidden, gated, seqLen, dim, ffn, act); err != nil {
+			t.Fatalf("GatedFFN(%v): %v", act, err)
+		}
+		return dst
+	}
+
+	silu := run(ActivationSiLU)
+	gelu := run(ActivationGELU)
+
+	same := true
+	for i := range silu {
+		if math.Abs(float64(silu[i]-gelu[i])) > 1e-6 {
+			same = false
+			break
+		}
+	}
+	if same {
+		t.Fatal("ActivationSiLU and ActivationGELU produced identical output — Config.Activation is not wired into GatedFFN")
 	}
 }
 

@@ -17,6 +17,19 @@ const (
 	PoolingMean
 )
 
+// Activation selects GatedFFN's nonlinearity. ModernBERT checkpoints disagree on this —
+// verify against the real config.json's "hidden_activation" field, never assume.
+type Activation int
+
+const (
+	// ActivationSiLU (Swish-1) — granite-embedding-97m-multilingual-r2's real
+	// hidden_activation. Zero value, so existing Config literals keep their old behavior.
+	ActivationSiLU Activation = iota
+	// ActivationGELU — bekko-embedding-v1-a8m/a25m's real hidden_activation (exact, erf-based
+	// GELU — matches config.json's "gelu", not the tanh approximation).
+	ActivationGELU
+)
+
 // Config is the architecture shape. See docs/LAST_PLAN_EXECUTED.md for granite's real
 // values, and the a8m/a25m values verified against bekko-embedding-v1-a8m's real
 // config.json + model.safetensors header.
@@ -31,6 +44,7 @@ type Config struct {
 	LocalRopeTheta     float64
 	Eps                float32
 	Pooling            Pooling
+	Activation         Activation
 }
 
 // LayerWeights holds one block's tensors: already dequantized to float32, already
@@ -53,12 +67,12 @@ type Weights struct {
 }
 
 // GatedFFN computes the gated feed-forward block: wiT projects to 2*ffnDim, splits into
-// two halves, applies the activation to the FIRST half and multiplies elementwise by the
-// second half (matching ModernBertMLP.forward: input, gate = Wi(x).chunk(2); Wo(act(input)*gate)),
-// then woT projects back down. Built on MatmulT and SiLU from kernels.go.
+// two halves, applies act to the FIRST half and multiplies elementwise by the second half
+// (matching ModernBertMLP.forward: input, gate = Wi(x).chunk(2); Wo(act(input)*gate)), then
+// woT projects back down. Built on MatmulT and the SiLU/GELU kernels in kernels.go.
 // hidden and gated are caller-owned scratch buffers (seqLen*2*ffnDim and seqLen*ffnDim
 // respectively) — GatedFFN allocates nothing, matching every other kernel in this file.
-func GatedFFN(dst, src, wiT, woT, hidden, gated []float32, seqLen, dim, ffnDim int) error {
+func GatedFFN(dst, src, wiT, woT, hidden, gated []float32, seqLen, dim, ffnDim int, act Activation) error {
 	if seqLen <= 0 || dim <= 0 || ffnDim <= 0 {
 		return fmt.Err("transformer: invalid dimensions for gatedffn")
 	}
@@ -80,8 +94,14 @@ func GatedFFN(dst, src, wiT, woT, hidden, gated []float32, seqLen, dim, ffnDim i
 		row := hidden[s*2*ffnDim : (s+1)*2*ffnDim]
 		first := row[:ffnDim]
 		gate := row[ffnDim:]
-		if err := SiLU(first); err != nil {
-			return err
+		var actErr error
+		if act == ActivationGELU {
+			actErr = GELU(first)
+		} else {
+			actErr = SiLU(first)
+		}
+		if actErr != nil {
+			return actErr
 		}
 		out := gated[s*ffnDim : (s+1)*ffnDim]
 		for i := 0; i < ffnDim; i++ {
@@ -239,7 +259,7 @@ func Encode(cfg Config, w Weights, tokenEmbeds []float32, seqLen int) ([]float32
 		if err := LayerNorm(mlpIn, h, lw.MlpNormGamma, nil, dim, cfg.Eps); err != nil {
 			return nil, err
 		}
-		if err := GatedFFN(mlpOut, mlpIn, lw.WiT, lw.MlpWoT, ffnHidden, ffnGated, seqLen, dim, ffnDim); err != nil {
+		if err := GatedFFN(mlpOut, mlpIn, lw.WiT, lw.MlpWoT, ffnHidden, ffnGated, seqLen, dim, ffnDim, cfg.Activation); err != nil {
 			return nil, err
 		}
 		if err := Add(h, mlpOut); err != nil {
